@@ -19,6 +19,22 @@ library(tidyverse)
 library(glue)
 ```
 
+## Goals
+
+This document is a tutorial introduction to using CMAP with R. The code is written in R, but many of the examples will translate easily into python examples if you are familiar with the python library for accessing CMAP. After providing a brief introduction to CMAP, my goals are to illustrate how to 
+
+* get started with CMAP 
+* learn about the data in the CMAP database
+* use some of the tools in the `cmap4r` package to access data
+* design your own database queries to customize the data you obtain.
+
+I illustrate the examples using data from
+
+* MIT GCM/Darwin output
+* satellite remote-sensing chlorophyll
+* molecular taxonomy at SPOT
+* Pisces model output
+
 ## What is CMAP?
 
 The [Simons Collaborative Marine Atlas Project](https://simonscmap.com/) (CMAP) is a tool for organizing and accessing oceanographic data. Much of the data is associated with investigators in the Simons projects (SCOPE, Gradients, and CBIOMES).
@@ -131,7 +147,12 @@ Get dataset info: table name, long name, range and resolution of each axis, cita
 ```{r}
 table_info = function(tbl = "tblCHL_REP", all_metadata = catalog) {
   all_metadata %>% filter(Table_Name == tbl) %>% slice(1) %>%
-  select(Table_Name, Make, Sensor, Temporal_Resolution, Spatial_Resolution,
+    mutate(Spatial_Range = paste("Latitude [", round(Lat_Min, 2), ", ", round(Lat_Max, 2), "], ",
+                               "Longitude [", round(Lon_Min, 2), ", ", round(Lon_Max, 2), "], ",
+                               "Depth [", round(Depth_Min, 2), ", ", round(Depth_Max,2 ), "]"),
+           Time_Range = paste("[", Time_Min, ", ", Time_Max, "]")) %>%
+  select(Table_Name, Make, Sensor, Temporal_Resolution, Spatial_Resolution, 
+         Spatial_Range, Time_Range,
          Dataset_Name, Data_Source, Distributor) %>%
   pivot_longer(everything(), names_to="Description", values_to="Value")
 }
@@ -139,6 +160,24 @@ table_info("tblBottle_Chisholm")
 ```
 
 ## Getting data 
+
+The `cmap4r` package defines several functions for querying a table in the database. These functions vary according to the amount of averaging done on the CMAP server. More processing done remotely means less data needs to be sent to you, so if you don't need the full resolution of the data, it's a good idea to use the right averaging query. 
+I'll start by illustrating several functions to extract and aggregate data: `get_section`, 
+`get_depthprofile`, `get_spacetime`, and `get_timeseries`. Since CMAP organizes data in relational database you can query with SQL. Later I will demonstrate several queries you can write to group and summarize data in a variety of ways.
+
+I'll demonstrate the following features of the SQL SELECT query
+
+* basic select statements and the modifiers `top()` and `distinct`
+* changing the name of selected variables
+* summary functions `count`, average, standard deviatio, and how to count missing data
+* `where` to restrict the query to part of the data
+* `group by` to define aggregation level
+* `having to`: filter out rows by a logical condition
+* joins to combine data from multiple tables
+
+There are lots of other things you can do with select, but these are emphasized because they will help reduce the amount of data that needs to be transmitted to you from the server, saving you time.
+
+### Warming up
 
 If you want to see what is in a table, without thinking about what time or space region to query, just get the "head" or top $n$ lines of the table:
 
@@ -154,7 +193,7 @@ exec_manualquery(mq)
 
 At present there are 9,319,750 rows, so it would take a long time to get them all! 
 
-The `cmap4r` package defines several functions for querying a table in the database. These functions vary according to the amount of averaging done on the CMAP server. More processing done remotely means less data needs to be sent to you, so if you don't need the full resolution of the data, it's a good idea to use the right averaging query.
+### Basic queries
 
 The raw retrieval format will send you all the data for a particular variable in a 4 dimensional (lat, lon, depth, time) box. It is easy to write a request for a lot of data which will take a long time to be transferred to you. You can always request a summary of how much data is to be sent before you get the data itself, so you know what to expect.
 
@@ -181,6 +220,8 @@ mq = glue("select count(*) as n from {tableName} where [time] between '{dt1}' an
 exec_manualquery(mq)
 ```
 
+### Built-in get_* queries
+
 Now get the data -- there is quite a bit of data, so this may take the better part of a minute.
 ```{r}
 tbl.subset <- get_section(tableName, varName, lat1, lat2, lon1, lon2,
@@ -197,6 +238,7 @@ Here are examples of each.
 
 ```{r}
 tableName <- "tblDarwin_Ecosystem"
+table_info(tableName)
 varName <- "phytoplankton"
 lat1 <- 20; lat2 <- 50
 lon1 <- -145; lon2 <- -175
@@ -211,7 +253,7 @@ tbl.spacetime <- get_spacetime(tableName, varName, lat1+10, lat2-10, lon1-10, lo
                                dt1, dt2, depth1, depth2)
 ```
 
-## Writing your own queries for data
+### Writing your own queries for data
 
 You can write your own custom database query in SQL and use the `exec_manualquery` function to retrieve the data. I'll gradually show how to explore the database through a sequence of examples.
 
@@ -224,7 +266,8 @@ exec_manualquery(mq)
 
 The count function can be applies to all data (`count(*)`) or to just a single variable. The `count(lat)` query will not count any rows with missing data for latitude. The `as n` part of the query is important; without it the result table will have no header row and R won't create fake names, so the first (and only) row of data will be used for the variable names.
 
-Here are a bunch of examples; I'll only execute the last one.
+Here are a bunch of examples tht illustrate counting ('count'), obtaining selected entries ('distinct', 'top'), filtering ('where'), ordering output ('order by'), and grouping output for summaries ('count' .. 'group by').
+I'll only execute the last one. Go ahead and try each of them to work out how the queries operate.
 
 ```{r}
 mq = "select concat('Number of observations ', str(count(lat))) as summary from tblESV where domain != 'Bacteria'"
@@ -268,7 +311,6 @@ a <- exec_manualquery(mq)
 head(a)
 ```
 
-
 By adjusting the group by variables, you can get any rounding you like. For example, here we average over 2x2 degree boxes.
 
 ```{r}
@@ -286,7 +328,7 @@ a <- exec_manualquery(mq)
 head(a)
 ```
 
-Averaging over time is a bit trickier. You need to do a computation with the time variable. For example, here we will compute the year (as an integer) of the time variable and add to that the day of year divided by 365 to get a decimal year. (Which will sometimes be wrong because of leap years.)
+Averaging over time is a bit trickier. You need to do a computation with the time variable. As a first attempt, we compute the year (as an integer) of the time variable and add to that the day of year divided by 365 to get a decimal year. (Which will sometimes be wrong because of leap years.)
 
 ```{r}
 mq = glue("select year([time])+datename(dayofyear,[time])/365.0 as jday,
@@ -304,7 +346,7 @@ a <- exec_manualquery(mq)
 head(a)
 ```
 
-Better still is to count the number of days since a reference day.
+A better approach is to count the number of days since a reference day using `datediff`.
 
 ```{r}
 mq = glue("select [time], datediff(day, '2016-01-01', [time]) as days,
@@ -326,13 +368,15 @@ Now round this number as you wish and use the rounded value as a grouping variab
 
 ```{r}
 mq = glue("select min([time]) as start_time, max([time]) as end_time,
-                  avg(lat) as mean_lat, avg(lon) as mean_lon, count(chl) as n, count(*)-count(chl) as n_na, avg(chl) as mean, 
+                  avg(lat) as mean_lat, avg(lon) as mean_lon, count(chl) as n, count(*)-count(chl) as n_na,
+                  avg(chl) as mean, 
                   stdev(chl) as sd
                   from tblCHL_REP 
                   where [time] between '2016-01-01' and '2016-12-31' and
                                            lat between 40 and 50 and
                                            lon between 50 and 60 
-                  group by round((lat-0.5)/2,0)*2+0.5, round((lon-0.5)/2,0)*2+0.5, round(datediff(day, '2016-01-01', [time])/15.0, 0)*15.0
+                  group by round((lat-0.5)/2,0)*2+0.5, round((lon-0.5)/2,0)*2+0.5, 
+                           round(datediff(day, '2016-01-01', [time])/15.0, 0)*15.0
                   having count(chl) > 0
                   order by mean_lat, mean_lon
             ")
@@ -345,13 +389,9 @@ head(a)
 
 Take a list of points (lat, lon, depth, time) and tolerances along each dimension. Write a query to get specified variables at those times rounded to those tolerances.
 
+This document is a work in progress. Send me your corrections, questions, etc., and I'll revise this document.
 
-## Extracting data
-
-CMAP comes with several functions to extract and aggregate data including `get_section`, 
-`get_depthprofile`, `get_spacetime`, and `get_timeseries`. 
-
-Since the data are in relational database you can query with SQL, its possible to create your own queries. Here I will explore several kinds of query you can write.
+## More examples
 
 I will develop the following queries using the tables with Darwin output (total phytoplankton,  zooplankton, and chlorophyll from tblDarwin_Ecosystem), 
 the World Ocean Atlas (temperature and nitrate concentration, from tblWOA_Climatology),
@@ -366,17 +406,7 @@ and satellte remote-sensing data (chlorophyll, from tblCHL_REP):
 * perform these queries for variables spread across two tables
 * repeat multiple queries using a sequence of centre points.
 
-I'll demonstrate the following features of the SQL SELECT query
-
-* basic select statements and the modifiers top(), distinct
-* changing the name of selected variables
-* summary functions count(), average(), stdev(), and how to count missing data
-* where to restrict the query to part of the data
-* group by to define aggregation level
-* having to filter out rows by a logical condition
-* joins to combine data from multiple tables
-
-There are lots of other things you can do with select, but these are emphasized because they will help reduce the amount of data that needs to be transmitted to you from the server, saving you time.
+(Not all of these are written yet.)
 
 ### Extract a 4d array
 
@@ -386,22 +416,28 @@ Start with the World Ocean Climatology. Get the name by searching the catalog. B
 search_metadata("World Ocean Atlas") %>% head(5)
 ```
 
-Query the remote database.
+Get some descriptive information about this table.
 
 ```{r}
 tbl = "tblWOA_Climatology"
-# mq = glue("select top 5 * from {tbl}")
-# exec_manualquery(mq)
+table_info(tbl)
+```
+
+Time is specified as an integer month (unlike most data in Darwin that has an ISO date and time.)
+
+Take a look at all the variables to see what data are in the table.
+
+```{r}
 get_head(tbl)
 ```
 
-How much data is there?
+How much data is there? (How many rows in the table?)
 ```{r}
 mq = glue("select count(*) as n from {tbl}")
 exec_manualquery(mq)
 ```
 
-Now we know what the variables are called. Write a more query to subset the data. Time is specified as an integer month (unlike most data in Darwin that has an ISO date and time.)
+Write a query to subset the data. 
 
 ```{r}
 tbl = "tblWOA_Climatology"
@@ -703,78 +739,17 @@ result1 %>%
   scale_fill_viridis_d(end=0.8, alpha=0.5)
 ```
 
-Compute chl slope / growth rate and plot distributions.
 
 Make 2d histogram - chl over lat x day
 
-* compute summary statistics for these regions, for a subgrid of points within the region,
-* compute summary statistics ignoring the year part of the date to obtain a climatology,
-* perform these queries for multiple variables in a single table
-* perform these queries for variables spread across two tables
-* repeat multiple queries using a sequence of centre points.
-
-
-tblWOA_Climatology - no time variable? missing. are there months somewhere?
-tblCHL_REP 1998-2018
-tblDarwin_Climatology 1993-2015
-
-Get phyto and zoo data from Darwin. Time series at a few points.
-
-
 ```{r}
-search_metadata("darwin", long_name_only = FALSE) %>% group_by(Temporal_Resolution) %>% count()
-search_metadata("darwin", long_name_only = FALSE) %>% filter(Temporal_Resolution == "Three Days")
+result1 %>% 
+  filter(time > "2010-01-01", time < "2010-12-31") %>%
+  group_by(time, lat) %>% 
+  summarize(mean_chl = mean(chl, na.rm=TRUE)) %>%
+  ggplot(aes(x=time, y=lat, fill=log10(mean_chl))) + geom_tile() +
+  theme_bw()
 ```
-
-```{r}
-table_info("tblDarwin_Phytoplankton")
-```
-
-(These metadata leave a bit to be desired. Where is the model and parameter inforamation?)
-
-Most of the Darwin output tables are climatologies. We have about 20 years of data for a model with 5 functional groups.
-
-```{r}
-tbl = "tblDarwin_Phytoplankton"
-get_head(tbl)
-```
-
-```{r}
-lat_c = 40.25 # centre and delta
-lat_d = 0.2
-lon_c = -55.25
-lon_d = 0.2 # 0.5 degree resolution
-depth_min = 0
-depth_max = 10
-mq = glue("select count(*) as n
-                  from {tbl} where 
-                  abs(lat - {lat_c}) <= {lat_d} and
-                  abs(lon - {lon_c}) <= {lon_d} and
-                  depth between {depth_min} and {depth_max}
-          ")
-exec_manualquery(mq)
-```
-
-
-use a grid from one table to look up values in another table (e.g., momthly 1x1 WOA to get chl from satellite, averaged over 20 years)
-
-
-compute global mean chl time series
-N & S hemisphere
-zonally averaged
-
-
-Irregular data
-tblESV
-
-percentiles of abundance, log abundance, log relative abundance
-frequency table of species, sorted by total abundance, mean abundance, median abundance
-cropped to show the top few
-grouped by day or study site
-
-
-Challenge exercise
-Find MLD using density profiles from ARGO
 
 
 Help I found useful:
